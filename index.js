@@ -13,9 +13,9 @@ const mongoose = require("mongoose");
 
 
 const app = express();
-const PORT = process.env.PORT || 8000;
+const PORT = process.env.PORT;
 const isProduction = process.env.NODE_ENV === "production";
-const MONGODB_URI = process.env.MONGODB_URI || "mongodb://127.0.0.1:27017/isaves";
+const MONGODB_URI = process.env.MONGODB_URI;
 const JWT_SECRET = process.env.JWT_SECRET;
 const ENCRYPTION_SECRET = process.env.ENCRYPTION_SECRET;
 const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID;
