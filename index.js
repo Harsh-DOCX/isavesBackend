@@ -5,10 +5,12 @@ const cookieParser = require("cookie-parser");
 const cors = require("cors");
 const crypto = require("crypto");
 const express = require("express");
+const { rateLimit } = require("express-rate-limit");
 const { OAuth2Client } = require("google-auth-library");
+const helmet = require("helmet");
 const jwt = require("jsonwebtoken");
 const mongoose = require("mongoose");
-const nodemailer = require("nodemailer");
+
 
 const app = express();
 const PORT = process.env.PORT || 8000;
@@ -17,35 +19,18 @@ const MONGODB_URI = process.env.MONGODB_URI || "mongodb://127.0.0.1:27017/isaves
 const JWT_SECRET = process.env.JWT_SECRET || "dev-only-isaves-secret-change-me";
 const ENCRYPTION_SECRET = process.env.ENCRYPTION_SECRET || "dev-only-vault-secret-change-me";
 const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID || "";
-const FRONTEND_ORIGIN = process.env.FRONTEND_ORIGIN || "http://localhost:3000";
+const FRONTEND_ORIGIN = process.env.FRONTEND_ORIGIN || "";
 const TOKEN_COOKIE = "isaves_token";
-const PASSWORD_RESET_TTL_MINUTES = Number(process.env.PASSWORD_RESET_TTL_MINUTES || 10);
-const SMTP_HOST = process.env.SMTP_HOST || "";
-const SMTP_PORT = Number(process.env.SMTP_PORT || 587);
-const SMTP_SECURE = String(process.env.SMTP_SECURE || "false").toLowerCase() === "true";
-const SMTP_USER = process.env.SMTP_USER || "";
-const SMTP_PASS = process.env.SMTP_PASS || "";
-const SMTP_FROM = process.env.SMTP_FROM || SMTP_USER;
 const encryptionKey = crypto.scryptSync(ENCRYPTION_SECRET, "isaves-salt", 32);
 const googleClient = GOOGLE_CLIENT_ID ? new OAuth2Client(GOOGLE_CLIENT_ID) : null;
-const mailTransporter =
-    SMTP_HOST && SMTP_USER && SMTP_PASS && SMTP_FROM
-        ? nodemailer.createTransport({
-            host: SMTP_HOST,
-            port: SMTP_PORT,
-            secure: SMTP_SECURE,
-            auth: {
-                user: SMTP_USER,
-                pass: SMTP_PASS,
-            },
-        })
-        : null;
+
 
 const requiredEnvInProd = [
     "MONGODB_URI",
     "JWT_SECRET",
     "ENCRYPTION_SECRET",
     "GOOGLE_CLIENT_ID",
+    "FRONTEND_ORIGIN",
 ];
 
 if (isProduction) {
@@ -67,6 +52,26 @@ if (!isProduction && (!process.env.JWT_SECRET || !process.env.ENCRYPTION_SECRET)
 const allowedOrigins = FRONTEND_ORIGIN.split(",")
     .map((origin) => origin.trim())
     .filter(Boolean);
+
+app.set("trust proxy", 1);
+app.disable("x-powered-by");
+app.use(helmet());
+
+const authLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000,
+    max: isProduction ? 50 : 200,
+    standardHeaders: true,
+    legacyHeaders: false,
+    message: { message: "Too many authentication attempts. Please try again later." },
+});
+
+const passwordResetLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000,
+    max: isProduction ? 5 : 20,
+    standardHeaders: true,
+    legacyHeaders: false,
+    message: { message: "Too many password reset attempts. Please try again later." },
+});
 
 app.use(
     cors({
@@ -112,12 +117,13 @@ const userSchema = new mongoose.Schema(
             type: String,
             required: true,
         },
-        passwordResetCodeHash: {
+        recoveryQuestion: {
             type: String,
-            default: null,
+            trim: true,
+            default: "",
         },
-        passwordResetExpiresAt: {
-            type: Date,
+        recoveryAnswer: {
+            type: String,
             default: null,
         },
     },
@@ -262,13 +268,7 @@ const COMMON_DOMAINS = [
     "zoom.us",
 ];
 
-const buildResetCode = () => String(crypto.randomInt(100000, 1000000));
 
-const hashResetCode = (code) =>
-    crypto
-        .createHash("sha256")
-        .update(`${code}:${JWT_SECRET}`)
-        .digest("hex");
 
 const sanitizeToken = (value) =>
     String(value || "")
@@ -429,26 +429,19 @@ const buildLogoUrls = (domain, rawQuery) => {
     return [...new Set(urls)];
 };
 
-const sendPasswordResetCode = async ({ to, username, code }) => {
-    if (!mailTransporter) {
-        if (!isProduction) {
-            console.warn(
-                `[DEV ONLY] Password reset code for ${to}${username ? ` (${username})` : ""}: ${code}`,
-            );
-            return;
-        }
+const RECOVERY_QUESTIONS = [
+    "What was the name of your first pet?",
+    "What city were you born in?",
+    "What is your mother's maiden name?",
+    "What was the name of your first school?",
+    "What is your favorite book or movie?",
+];
 
-        throw new Error("Password reset email is not configured.");
-    }
-
-    await mailTransporter.sendMail({
-        from: SMTP_FROM,
-        to,
-        subject: "iSaves Security Code",
-        text: `Your iSaves security code is ${code}. It expires in ${PASSWORD_RESET_TTL_MINUTES} minutes.`,
-        html: `<p>Your iSaves security code is <strong>${code}</strong>.</p><p>It expires in ${PASSWORD_RESET_TTL_MINUTES} minutes.</p>`,
-    });
-};
+const hashRecoveryAnswer = (answer) =>
+    crypto
+        .createHash("sha256")
+        .update(`${answer.trim().toLowerCase()}:${JWT_SECRET}`)
+        .digest("hex");
 
 const encryptSecret = (value) => {
     const iv = crypto.randomBytes(12);
@@ -557,19 +550,25 @@ app.get("/api/site-image", authMiddleware, (req, res) => {
     });
 });
 
-app.post("/api/auth/signup", async (req, res) => {
-    const { username, email, password } = req.body;
+app.post("/api/auth/signup", authLimiter, async (req, res) => {
+    const { username, email, password, recoveryQuestion, recoveryAnswer } = req.body;
 
-    if (!username || !email || !password) {
+    if (!username || !email || !password || !recoveryQuestion || !recoveryAnswer) {
         return res
             .status(400)
-            .json({ message: "Username, email, and password are required." });
+            .json({ message: "Username, email, password, recovery question, and recovery answer are required." });
     }
 
     if (password.length < 8) {
         return res
             .status(400)
             .json({ message: "Password must be at least 8 characters long." });
+    }
+
+    if (recoveryAnswer.trim().length === 0) {
+        return res
+            .status(400)
+            .json({ message: "Recovery answer cannot be empty." });
     }
 
     const normalizedEmail = normalizeEmail(email);
@@ -585,6 +584,8 @@ app.post("/api/auth/signup", async (req, res) => {
         username: username.trim(),
         email: normalizedEmail,
         passwordHash: await bcrypt.hash(password, 10),
+        recoveryQuestion: recoveryQuestion.trim(),
+        recoveryAnswer: hashRecoveryAnswer(recoveryAnswer),
     });
 
     setAuthCookie(res, issueToken(user));
@@ -594,7 +595,7 @@ app.post("/api/auth/signup", async (req, res) => {
     });
 });
 
-app.post("/api/auth/login", async (req, res) => {
+app.post("/api/auth/login", authLimiter, async (req, res) => {
     const { email, password } = req.body;
 
     if (!email || !password) {
@@ -621,7 +622,7 @@ app.post("/api/auth/login", async (req, res) => {
     });
 });
 
-app.post("/api/auth/google", async (req, res) => {
+app.post("/api/auth/google", authLimiter, async (req, res) => {
     if (!googleClient || !GOOGLE_CLIENT_ID) {
         return res.status(500).json({ message: "Google authentication is not configured." });
     }
@@ -666,7 +667,7 @@ app.get("/api/auth/me", authMiddleware, async (req, res) => {
 });
 
 app.put("/api/auth/profile", authMiddleware, async (req, res) => {
-    const { username, mobileNumber, personalInfo } = req.body;
+    const { username, mobileNumber, personalInfo, recoveryQuestion, recoveryAnswer } = req.body;
     const updates = {};
 
     if (typeof username !== "undefined") {
@@ -692,6 +693,22 @@ app.put("/api/auth/profile", authMiddleware, async (req, res) => {
         updates.personalInfo = String(personalInfo).trim();
     }
 
+    if (typeof recoveryQuestion !== "undefined") {
+        const trimmedQuestion = String(recoveryQuestion).trim();
+        if (!trimmedQuestion) {
+            return res.status(400).json({ message: "Recovery question cannot be empty." });
+        }
+        updates.recoveryQuestion = trimmedQuestion;
+    }
+
+    if (typeof recoveryAnswer !== "undefined") {
+        const trimmedAnswer = String(recoveryAnswer).trim();
+        if (!trimmedAnswer) {
+            return res.status(400).json({ message: "Recovery answer cannot be empty." });
+        }
+        updates.recoveryAnswer = hashRecoveryAnswer(recoveryAnswer);
+    }
+
     if (Object.keys(updates).length === 0) {
         return res.status(400).json({ message: "No profile changes provided." });
     }
@@ -707,7 +724,7 @@ app.post("/api/auth/logout", (req, res) => {
     return res.status(204).send();
 });
 
-app.post("/api/auth/forgot-password", async (req, res) => {
+app.post("/api/auth/forgot-password", passwordResetLimiter, async (req, res) => {
     const { email } = req.body;
 
     if (!email) {
@@ -719,42 +736,24 @@ app.post("/api/auth/forgot-password", async (req, res) => {
 
     if (!user) {
         return res.json({
-            message: "If an account exists for that email, a security code has been sent.",
+            question: null,
+            message: "If an account exists for that email, you can reset your password.",
         });
-    }
-
-    const code = buildResetCode();
-    user.passwordResetCodeHash = hashResetCode(code);
-    user.passwordResetExpiresAt = new Date(
-        Date.now() + PASSWORD_RESET_TTL_MINUTES * 60 * 1000,
-    );
-    await user.save();
-
-    try {
-        await sendPasswordResetCode({
-            to: normalizedEmail,
-            username: user.username,
-            code,
-        });
-    } catch (error) {
-        user.passwordResetCodeHash = null;
-        user.passwordResetExpiresAt = null;
-        await user.save();
-        throw error;
     }
 
     return res.json({
-        message: "If an account exists for that email, a security code has been sent.",
+        question: user.recoveryQuestion || null,
+        message: "Please answer your recovery question to reset your password.",
     });
 });
 
-app.post("/api/auth/reset-password", async (req, res) => {
-    const { email, code, newPassword } = req.body;
+app.post("/api/auth/reset-password", passwordResetLimiter, async (req, res) => {
+    const { email, recoveryAnswer, newPassword } = req.body;
 
-    if (!email || !code || !newPassword) {
+    if (!email || !recoveryAnswer || !newPassword) {
         return res
             .status(400)
-            .json({ message: "Email, security code, and new password are required." });
+            .json({ message: "Email, recovery answer, and new password are required." });
     }
 
     if (String(newPassword).length < 8) {
@@ -766,22 +765,15 @@ app.post("/api/auth/reset-password", async (req, res) => {
     const normalizedEmail = normalizeEmail(email);
     const user = await User.findOne({ email: normalizedEmail });
 
-    if (
-        !user ||
-        !user.passwordResetCodeHash ||
-        !user.passwordResetExpiresAt ||
-        user.passwordResetExpiresAt.getTime() < Date.now()
-    ) {
-        return res.status(400).json({ message: "Security code is invalid or expired." });
+    if (!user || !user.recoveryAnswer) {
+        return res.status(400).json({ message: "User not found or recovery is not configured." });
     }
 
-    if (hashResetCode(String(code).trim()) !== user.passwordResetCodeHash) {
-        return res.status(400).json({ message: "Security code is invalid or expired." });
+    if (hashRecoveryAnswer(recoveryAnswer) !== user.recoveryAnswer) {
+        return res.status(400).json({ message: "Incorrect recovery answer." });
     }
 
     user.passwordHash = await bcrypt.hash(newPassword, 10);
-    user.passwordResetCodeHash = null;
-    user.passwordResetExpiresAt = null;
     await user.save();
 
     return res.json({ message: "Password updated successfully. You can now log in." });
