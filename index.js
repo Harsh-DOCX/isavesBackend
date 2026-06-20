@@ -22,19 +22,13 @@ const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID;
 const FRONTEND_ORIGIN = process.env.FRONTEND_ORIGIN;
 const TOKEN_COOKIE = "isaves_token";
 
-if (!ENCRYPTION_SECRET) {
-    throw new Error("ENCRYPTION_SECRET is missing");
-}
-
-const encryptionKey = crypto.scryptSync(ENCRYPTION_SECRET, "isaves-salt", 32);
-const googleClient = GOOGLE_CLIENT_ID ? new OAuth2Client(GOOGLE_CLIENT_ID) : null;
-
-
 if (!JWT_SECRET) {
     throw new Error("JWT_SECRET is missing");
 }
 
-
+if (!ENCRYPTION_SECRET) {
+    throw new Error("ENCRYPTION_SECRET is missing");
+}
 
 if (!GOOGLE_CLIENT_ID) {
     console.warn("GOOGLE_CLIENT_ID is missing");
@@ -44,7 +38,8 @@ if (!FRONTEND_ORIGIN) {
     throw new Error("FRONTEND_ORIGIN is missing");
 }
 
-
+const encryptionKey = crypto.scryptSync(ENCRYPTION_SECRET, "isaves-salt", 32);
+const googleClient = GOOGLE_CLIENT_ID ? new OAuth2Client(GOOGLE_CLIENT_ID) : null;
 
 const requiredEnvInProd = [
     "MONGODB_URI",
@@ -64,11 +59,6 @@ if (isProduction) {
     }
 }
 
-if (!isProduction && (!process.env.JWT_SECRET || !process.env.ENCRYPTION_SECRET)) {
-    console.warn(
-        "Using development fallback secrets. Set JWT_SECRET and ENCRYPTION_SECRET in .env",
-    );
-}
 
 const allowedOrigins = FRONTEND_ORIGIN.split(",")
     .map((origin) => origin.trim())
