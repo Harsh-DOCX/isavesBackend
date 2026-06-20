@@ -16,13 +16,34 @@ const app = express();
 const PORT = process.env.PORT || 8000;
 const isProduction = process.env.NODE_ENV === "production";
 const MONGODB_URI = process.env.MONGODB_URI || "mongodb://127.0.0.1:27017/isaves";
-const JWT_SECRET = process.env.JWT_SECRET || "dev-only-isaves-secret-change-me";
-const ENCRYPTION_SECRET = process.env.ENCRYPTION_SECRET || "dev-only-vault-secret-change-me";
-const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID || "";
-const FRONTEND_ORIGIN = process.env.FRONTEND_ORIGIN || "";
+const JWT_SECRET = process.env.JWT_SECRET;
+const ENCRYPTION_SECRET = process.env.ENCRYPTION_SECRET;
+const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID;
+const FRONTEND_ORIGIN = process.env.FRONTEND_ORIGIN;
 const TOKEN_COOKIE = "isaves_token";
+
+if (!ENCRYPTION_SECRET) {
+    throw new Error("ENCRYPTION_SECRET is missing");
+}
+
 const encryptionKey = crypto.scryptSync(ENCRYPTION_SECRET, "isaves-salt", 32);
 const googleClient = GOOGLE_CLIENT_ID ? new OAuth2Client(GOOGLE_CLIENT_ID) : null;
+
+
+if (!JWT_SECRET) {
+    throw new Error("JWT_SECRET is missing");
+}
+
+
+
+if (!GOOGLE_CLIENT_ID) {
+    console.warn("GOOGLE_CLIENT_ID is missing");
+}
+
+if (!FRONTEND_ORIGIN) {
+    throw new Error("FRONTEND_ORIGIN is missing");
+}
+
 
 
 const requiredEnvInProd = [
